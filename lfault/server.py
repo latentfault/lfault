@@ -1,12 +1,13 @@
 import logging
 import socketserver
 
+from .request import REQUEST_HEAD_TERMINATOR, RequestHeadParseError, parse_request_head
+
 logger = logging.getLogger(__name__)
 
 
 class ProxyRequestHandler(socketserver.BaseRequestHandler):
     buffer_size = 4096
-    header_terminator = b"\r\n\r\n"
 
     def setup(self) -> None:
         host, port = self.client_address
@@ -22,17 +23,22 @@ class ProxyRequestHandler(socketserver.BaseRequestHandler):
         if request_head is None:
             self.logger.warning("connection closed before request head completed")
             return
-        request = request_head.decode("iso-8859-1").rstrip()
-        self.logger.info("incoming request:\n%s", request)
+        try:
+            request = parse_request_head(request_head)
+        except RequestHeadParseError as error:
+            self.logger.warning("could not parse request head: %s", error)
+            return
+        request_text = request.raw.decode("iso-8859-1").rstrip()
+        self.logger.info("incoming request:\n%s", request_text)
         self._send_not_implemented()
 
     def _receive_request_head(self) -> bytes | None:
-        while (boundary := self.input_buffer.find(self.header_terminator)) < 0:
+        while (boundary := self.input_buffer.find(REQUEST_HEAD_TERMINATOR)) < 0:
             chunk = self.request.recv(self.buffer_size)
             if not chunk:
                 return None
             self.input_buffer.extend(chunk)
-        end = boundary + len(self.header_terminator)
+        end = boundary + len(REQUEST_HEAD_TERMINATOR)
         request_head = bytes(self.input_buffer[:end])
         del self.input_buffer[:end]
         return request_head
