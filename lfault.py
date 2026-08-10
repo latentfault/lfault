@@ -3,6 +3,7 @@ import socket
 
 HOST = "127.0.0.1"
 PORT = 8080
+BUFFER_SIZE = 4096
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -19,7 +20,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         request = b""
 
         while b"\r\n\r\n" not in request:
-            chunk = client.recv(4096)
+            chunk = client.recv(BUFFER_SIZE)
 
             if not chunk:
                 break
