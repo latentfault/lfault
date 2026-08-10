@@ -14,21 +14,28 @@ class ProxyRequestHandler(socketserver.BaseRequestHandler):
             logger,
             {"context": f"client {host}:{port}"},
         )
+        self.input_buffer = bytearray()
         self.logger.info("connection opened")
 
     def handle(self) -> None:
-        request = self._receive_request().decode("iso-8859-1").rstrip()
+        request_head = self._receive_request_head()
+        if request_head is None:
+            self.logger.warning("connection closed before request head completed")
+            return
+        request = request_head.decode("iso-8859-1").rstrip()
         self.logger.info("incoming request:\n%s", request)
         self._send_not_implemented()
 
-    def _receive_request(self) -> bytes:
-        request = bytearray()
-        while self.header_terminator not in request:
+    def _receive_request_head(self) -> bytes | None:
+        while (boundary := self.input_buffer.find(self.header_terminator)) < 0:
             chunk = self.request.recv(self.buffer_size)
             if not chunk:
-                break
-            request.extend(chunk)
-        return bytes(request)
+                return None
+            self.input_buffer.extend(chunk)
+        end = boundary + len(self.header_terminator)
+        request_head = bytes(self.input_buffer[:end])
+        del self.input_buffer[:end]
+        return request_head
 
     def _send_not_implemented(self) -> None:
         self.request.sendall(

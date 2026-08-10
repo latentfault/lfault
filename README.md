@@ -7,3 +7,9 @@ an HTTP proxy with boundary issues.
 ```console
 python3 -m lfault
 ```
+
+## Test
+
+```console
+python3 -m unittest -v
+```
