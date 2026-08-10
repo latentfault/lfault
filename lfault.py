@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import socket
+import socketserver
 
 HOST = "127.0.0.1"
 PORT = 8080
@@ -13,44 +13,49 @@ NOT_IMPLEMENTED_RESPONSE = (
 )
 
 
-def receive_request(client: socket.socket) -> bytes:
-    request = bytearray()
+class ProxyRequestHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        address = self.client_address
+        print(f"[+] connection from {address[0]}:{address[1]}")
 
-    while HEADER_TERMINATOR not in request:
-        chunk = client.recv(BUFFER_SIZE)
-        if not chunk:
-            break
+        request = self._receive_request()
+        print("[+] incoming request:")
+        print(request.decode("iso-8859-1").rstrip())
 
-        request.extend(chunk)
+        self.request.sendall(NOT_IMPLEMENTED_RESPONSE)
 
-    return bytes(request)
+    def _receive_request(self) -> bytes:
+        request = bytearray()
+
+        while HEADER_TERMINATOR not in request:
+            chunk = self.request.recv(BUFFER_SIZE)
+            if not chunk:
+                break
+
+            request.extend(chunk)
+
+        return bytes(request)
 
 
-def handle_client(client: socket.socket, address: tuple[str, int]) -> None:
-    print(f"[+] connection from {address[0]}:{address[1]}")
+class ThreadingProxyServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
 
-    request = receive_request(client)
-    print("[+] incoming request:")
-    print(request.decode("iso-8859-1").rstrip())
+    def __init__(self, host: str, port: int) -> None:
+        super().__init__((host, port), ProxyRequestHandler)
 
-    client.sendall(NOT_IMPLEMENTED_RESPONSE)
-
-
-def serve_once(host: str, port: int) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((host, port))
-        server.listen()
-
+    def run(self) -> None:
+        host, port = self.server_address
         print(f"[+] lfault listening on {host}:{port}")
-
-        client, address = server.accept()
-        with client:
-            handle_client(client, address)
+        self.serve_forever()
 
 
 def main() -> None:
-    serve_once(HOST, PORT)
+    try:
+        with ThreadingProxyServer(HOST, PORT) as server:
+            server.run()
+    except KeyboardInterrupt:
+        print("\n[+] lfault stopped")
 
 
 if __name__ == "__main__":
