@@ -4,7 +4,7 @@ from unittest.mock import Mock
 from lfault.server import ProxyRequestHandler
 
 
-class RequestHeadTests(unittest.TestCase):
+class RequestHeadReceivingTests(unittest.TestCase):
     def make_handler(self, *chunks: bytes) -> ProxyRequestHandler:
         handler = ProxyRequestHandler.__new__(ProxyRequestHandler)
         handler.request = Mock()
@@ -26,12 +26,12 @@ class RequestHeadTests(unittest.TestCase):
         self.assertEqual(request_head, b"POST / HTTP/1.1\r\n\r\n")
         self.assertEqual(handler.input_buffer, b"body")
 
-    def test_reads_coalesced_request_heads_separately(self) -> None:
+    def test_leaves_coalesced_request_head_bytes_buffered(self) -> None:
         first = b"GET /first HTTP/1.1\r\n\r\n"
         second = b"GET /second HTTP/1.1\r\n\r\n"
         handler = self.make_handler(first + second)
         self.assertEqual(handler._receive_request_head(), first)
-        self.assertEqual(handler._receive_request_head(), second)
+        self.assertEqual(handler.input_buffer, second)
         handler.request.recv.assert_called_once()
 
     def test_reports_an_incomplete_request_head(self) -> None:
