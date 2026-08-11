@@ -8,8 +8,10 @@ class RequestHeadParsingTests(unittest.TestCase):
         raw = b"GET / HTTP/1.1\r\nX: first\r\nX:second\r\n\r\n"
         request = parse_request_head(raw)
         self.assertEqual(request.raw, raw)
-        self.assertEqual((request.method, request.target, request.version),
-                         (b"GET", b"/", b"HTTP/1.1"))
+        self.assertEqual(
+            (request.method, request.target, request.version),
+            (b"GET", b"/", b"HTTP/1.1")
+        )
         self.assertEqual(
             request.fields,
             (
