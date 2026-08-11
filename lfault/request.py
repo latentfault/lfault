@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-REQUEST_HEAD_TERMINATOR = b"\r\n\r\n"
+from .http1 import HEAD_TERMINATOR
 
 
 class RequestHeadParseError(ValueError):
@@ -24,9 +24,9 @@ class RequestHead:
 
 def parse_request_head(raw: bytes) -> RequestHead:
     """Extract a byte-preserving structure without validating HTTP syntax."""
-    if not raw.endswith(REQUEST_HEAD_TERMINATOR):
+    if not raw.endswith(HEAD_TERMINATOR):
         raise RequestHeadParseError("request head is incomplete")
-    head = raw.removesuffix(REQUEST_HEAD_TERMINATOR)
+    head = raw.removesuffix(HEAD_TERMINATOR)
     request_line, *field_lines = head.split(b"\r\n")
     method, target, version = _parse_request_line(request_line)
     fields = tuple(_parse_field_line(line) for line in field_lines)
