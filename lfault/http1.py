@@ -7,19 +7,22 @@ HEAD_TERMINATOR = b"\r\n\r\n"
 
 
 class BufferedSocket:
+    """Owns bytes already received but not yet consumed by a reader."""
+
     def __init__(self, transport: socket.socket) -> None:
         self.transport = transport
-        self.buffer = bytearray()
+        self._buffer = bytearray()
 
     def read(self, size: int) -> bytes:
-        if not self.buffer:
+        if not self._buffer:
             return self.transport.recv(size)
-        count = min(size, len(self.buffer))
-        data = bytes(self.buffer[:count])
-        del self.buffer[:count]
+        count = min(size, len(self._buffer))
+        data = bytes(self._buffer[:count])
+        del self._buffer[:count]
         return data
 
     def read_exactly(self, size: int) -> tuple[bytes, bool]:
+        """Return size bytes, or partial data and False if EOF arrives first."""
         data = bytearray()
         while len(data) < size:
             chunk = self.read(size - len(data))
@@ -29,17 +32,23 @@ class BufferedSocket:
         return bytes(data), True
 
     def read_until(self, marker: bytes) -> tuple[bytes, bool]:
-        while (boundary := self.buffer.find(marker)) < 0:
+        """Read through marker, or return partial data and False at EOF."""
+        while (boundary := self._buffer.find(marker)) < 0:
             chunk = self.transport.recv(BUFFER_SIZE)
             if not chunk:
-                data = bytes(self.buffer)
-                self.buffer.clear()
+                data = bytes(self._buffer)
+                self._buffer.clear()
                 return data, False
-            self.buffer.extend(chunk)
+            self._buffer.extend(chunk)
         end = boundary + len(marker)
-        data = bytes(self.buffer[:end])
-        del self.buffer[:end]
+        data = bytes(self._buffer[:end])
+        del self._buffer[:end]
         return data, True
+
+    def drain_buffer(self) -> bytes:
+        data = bytes(self._buffer)
+        self._buffer.clear()
+        return data
 
 
 class BodyKind(Enum):
@@ -48,7 +57,7 @@ class BodyKind(Enum):
 
 
 def request_body_framing(request_head: bytes) -> int | BodyKind:
-    if _has_ambiguous_framing_field(request_head):
+    if _has_whitespace_around_framing_field_name(request_head):
         return BodyKind.OPAQUE
     transfer_encoding = _header_values(request_head, b"transfer-encoding")
     content_length = _header_values(request_head, b"content-length")
@@ -66,14 +75,14 @@ def request_body_framing(request_head: bytes) -> int | BodyKind:
     return 0
 
 
-def response_body_framing(
+def final_response_body_framing(
     response_head: bytes,
     request_method: bytes,
     status: int,
 ) -> int | BodyKind:
     if request_method == b"HEAD" or status in (204, 304):
         return 0
-    if _has_ambiguous_framing_field(response_head):
+    if _has_whitespace_around_framing_field_name(response_head):
         return BodyKind.OPAQUE
     transfer_encoding = _header_values(response_head, b"transfer-encoding")
     if transfer_encoding:
@@ -143,10 +152,10 @@ def _relay_chunked(source: BufferedSocket, destination: socket.socket) -> bool:
                     return True
         if not _relay_exactly(source, destination, size):
             return False
-        ending, complete = source.read_exactly(len(LINE_TERMINATOR))
-        if ending:
-            destination.sendall(ending)
-        if not complete or ending != LINE_TERMINATOR:
+        chunk_terminator, complete = source.read_exactly(len(LINE_TERMINATOR))
+        if chunk_terminator:
+            destination.sendall(chunk_terminator)
+        if not complete or chunk_terminator != LINE_TERMINATOR:
             return False
 
 
@@ -164,12 +173,18 @@ def _header_values(message_head: bytes, name: bytes) -> list[bytes]:
     return values
 
 
-def _has_ambiguous_framing_field(message_head: bytes) -> bool:
+def _has_whitespace_around_framing_field_name(message_head: bytes) -> bool:
+    """Detect framing names whose surrounding whitespace can change parsing."""
     framing_names = (b"content-length", b"transfer-encoding")
     for line in message_head.split(LINE_TERMINATOR)[1:]:
         field_name, colon, _ = line.partition(b":")
-        normalized = field_name.strip().lower()
-        if colon and normalized in framing_names and field_name.lower() != normalized:
+        if not colon:
+            continue
+        stripped_name = field_name.strip()
+        if (
+            stripped_name.lower() in framing_names
+            and field_name != stripped_name
+        ):
             return True
     return False
 

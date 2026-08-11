@@ -4,8 +4,8 @@ from unittest.mock import Mock
 from lfault.http1 import (
     BodyKind,
     BufferedSocket,
+    final_response_body_framing,
     request_body_framing,
-    response_body_framing,
 )
 
 
@@ -16,30 +16,44 @@ class BufferedSocketTests(unittest.TestCase):
         stream = BufferedSocket(transport)
 
         self.assertEqual(stream.read_until(b"\r\n\r\n"), (b"head\r\n\r\n", True))
-        self.assertEqual(bytes(stream.buffer), b"following")
+        self.assertEqual(stream.read(len(b"following")), b"following")
 
 
 class BodyFramingTests(unittest.TestCase):
-    def test_classifies_framing_not_exercised_end_to_end(self) -> None:
+    def test_request_with_whitespace_before_framing_colon_is_opaque(self) -> None:
         self.assertEqual(
             request_body_framing(
                 b"POST / HTTP/1.1\r\nContent-Length : 4\r\n\r\n"
             ),
             BodyKind.OPAQUE,
         )
+
+    def test_response_with_final_chunked_coding_is_chunked(self) -> None:
         self.assertEqual(
-            response_body_framing(
+            final_response_body_framing(
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
                 b"GET",
                 200,
             ),
             BodyKind.CHUNKED,
         )
+
+    def test_head_response_has_no_body(self) -> None:
         self.assertEqual(
-            response_body_framing(b"HTTP/1.1 200 OK\r\n\r\n", b"HEAD", 200),
+            final_response_body_framing(
+                b"HTTP/1.1 200 OK\r\n\r\n",
+                b"HEAD",
+                200,
+            ),
             0,
         )
+
+    def test_unframed_response_is_opaque(self) -> None:
         self.assertEqual(
-            response_body_framing(b"HTTP/1.1 200 OK\r\n\r\n", b"GET", 200),
+            final_response_body_framing(
+                b"HTTP/1.1 200 OK\r\n\r\n",
+                b"GET",
+                200,
+            ),
             BodyKind.OPAQUE,
         )
