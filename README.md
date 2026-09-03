@@ -1,6 +1,6 @@
 # lfault
 
-an HTTP proxy with boundary issues.
+An HTTP proxy with boundary issues.
 
 ## Run
 

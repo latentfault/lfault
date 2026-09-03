@@ -4,6 +4,7 @@ from enum import Enum
 BUFFER_SIZE = 4096
 LINE_TERMINATOR = b"\r\n"
 HEAD_TERMINATOR = b"\r\n\r\n"
+_HEX_DIGITS = b"0123456789abcdefABCDEF"
 
 
 class BufferedSocket:
@@ -40,6 +41,7 @@ class BufferedSocket:
                 self._buffer.clear()
                 return data, False
             self._buffer.extend(chunk)
+
         end = boundary + len(marker)
         data = bytes(self._buffer[:end])
         del self._buffer[:end]
@@ -56,45 +58,55 @@ class BodyKind(Enum):
     OPAQUE = "opaque"
 
 
-def request_body_framing(request_head: bytes) -> int | BodyKind:
+BodyFraming = int | BodyKind
+
+
+def request_body_framing(request_head: bytes) -> BodyFraming:
     if _has_whitespace_around_framing_field_name(request_head):
         return BodyKind.OPAQUE
+
     transfer_encoding = _header_values(request_head, b"transfer-encoding")
     content_length = _header_values(request_head, b"content-length")
+
     if transfer_encoding:
-        if content_length:
+        final_coding = _final_transfer_coding(transfer_encoding)
+        if content_length or final_coding != b"chunked":
             return BodyKind.OPAQUE
-        if _final_transfer_coding(transfer_encoding) == b"chunked":
-            return BodyKind.CHUNKED
-        return BodyKind.OPAQUE
-    if content_length:
-        length = _content_length(content_length)
-        if length is None:
-            return BodyKind.OPAQUE
-        return length
-    return 0
+        return BodyKind.CHUNKED
+
+    if not content_length:
+        return 0
+    length = _content_length(content_length)
+    return BodyKind.OPAQUE if length is None else length
 
 
 def final_response_body_framing(
-    response_head: bytes,
-    request_method: bytes,
-    status: int,
-) -> int | BodyKind:
+    response_head: bytes, request_method: bytes, status: int
+) -> BodyFraming:
     if request_method == b"HEAD" or status in (204, 304):
         return 0
     if _has_whitespace_around_framing_field_name(response_head):
         return BodyKind.OPAQUE
+
     transfer_encoding = _header_values(response_head, b"transfer-encoding")
     if transfer_encoding:
-        if _final_transfer_coding(transfer_encoding) == b"chunked":
+        final_coding = _final_transfer_coding(transfer_encoding)
+        if final_coding == b"chunked":
             return BodyKind.CHUNKED
         return BodyKind.OPAQUE
+
     content_length = _header_values(response_head, b"content-length")
-    if content_length:
-        length = _content_length(content_length)
-        if length is not None:
-            return length
-    return BodyKind.OPAQUE
+    if not content_length:
+        return BodyKind.OPAQUE
+    length = _content_length(content_length)
+    return BodyKind.OPAQUE if length is None else length
+
+
+def response_status(response_head: bytes) -> int | None:
+    parts = response_head.partition(LINE_TERMINATOR)[0].split(b" ", 2)
+    if len(parts) < 2 or not parts[1].isdigit():
+        return None
+    return int(parts[1])
 
 
 def has_expectation(request_head: bytes) -> bool:
@@ -102,9 +114,7 @@ def has_expectation(request_head: bytes) -> bool:
 
 
 def _relay_exactly(
-    source: BufferedSocket,
-    destination: socket.socket,
-    length: int,
+    source: BufferedSocket, destination: socket.socket, length: int
 ) -> bool:
     remaining = length
     while remaining:
@@ -117,9 +127,7 @@ def _relay_exactly(
 
 
 def relay_body(
-    source: BufferedSocket,
-    destination: socket.socket,
-    framing: int | BodyKind,
+    source: BufferedSocket, destination: socket.socket, framing: BodyFraming
 ) -> bool:
     if isinstance(framing, int):
         return _relay_exactly(source, destination, framing)
@@ -130,33 +138,50 @@ def relay_body(
 
 def _relay_chunked(source: BufferedSocket, destination: socket.socket) -> bool:
     while True:
-        size_line, complete = source.read_until(LINE_TERMINATOR)
-        if size_line:
-            destination.sendall(size_line)
-        if not complete:
+        size = _relay_chunk_size_line(source, destination)
+        if size is None:
             return False
-        size_token = size_line.removesuffix(LINE_TERMINATOR).split(b";", 1)[0]
-        if not size_token or any(
-            byte not in b"0123456789abcdefABCDEF" for byte in size_token
-        ):
-            return False
-        size = int(size_token, 16)
         if size == 0:
-            while True:
-                trailer_line, complete = source.read_until(LINE_TERMINATOR)
-                if trailer_line:
-                    destination.sendall(trailer_line)
-                if not complete:
-                    return False
-                if trailer_line == LINE_TERMINATOR:
-                    return True
+            return _relay_trailers(source, destination)
+
         if not _relay_exactly(source, destination, size):
             return False
+
         chunk_terminator, complete = source.read_exactly(len(LINE_TERMINATOR))
         if chunk_terminator:
             destination.sendall(chunk_terminator)
         if not complete or chunk_terminator != LINE_TERMINATOR:
             return False
+
+
+def _relay_chunk_size_line(
+    source: BufferedSocket, destination: socket.socket
+) -> int | None:
+    size_line, complete = source.read_until(LINE_TERMINATOR)
+    if size_line:
+        destination.sendall(size_line)
+    if not complete:
+        return None
+
+    return _parse_chunk_size(size_line)
+
+
+def _parse_chunk_size(size_line: bytes) -> int | None:
+    size_token = size_line.removesuffix(LINE_TERMINATOR).split(b";", 1)[0]
+    if not size_token or any(byte not in _HEX_DIGITS for byte in size_token):
+        return None
+    return int(size_token, 16)
+
+
+def _relay_trailers(source: BufferedSocket, destination: socket.socket) -> bool:
+    while True:
+        trailer_line, complete = source.read_until(LINE_TERMINATOR)
+        if trailer_line:
+            destination.sendall(trailer_line)
+        if not complete:
+            return False
+        if trailer_line == LINE_TERMINATOR:
+            return True
 
 
 def relay_to_eof(source: BufferedSocket, destination: socket.socket) -> None:
@@ -178,13 +203,8 @@ def _has_whitespace_around_framing_field_name(message_head: bytes) -> bool:
     framing_names = (b"content-length", b"transfer-encoding")
     for line in message_head.split(LINE_TERMINATOR)[1:]:
         field_name, colon, _ = line.partition(b":")
-        if not colon:
-            continue
-        stripped_name = field_name.strip()
-        if (
-            stripped_name.lower() in framing_names
-            and field_name != stripped_name
-        ):
+        name = field_name.strip()
+        if colon and name.lower() in framing_names and field_name != name:
             return True
     return False
 
@@ -195,12 +215,19 @@ def _final_transfer_coding(values: list[bytes]) -> bytes | None:
         for value in values
         for token in value.split(b",")
     ]
+
     return codings[-1] if codings and all(codings) else None
 
 
 def _content_length(values: list[bytes]) -> int | None:
-    tokens = [token.strip() for value in values for token in value.split(b",")]
+    tokens = [
+        token.strip()
+        for value in values
+        for token in value.split(b",")
+    ]
+
     if not tokens or any(not token.isdigit() for token in tokens):
         return None
+
     lengths = [int(token) for token in tokens]
     return lengths[0] if all(length == lengths[0] for length in lengths) else None

@@ -1,10 +1,9 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
-from lfault.server import (
-    CONNECT_ESTABLISHED_RESPONSE,
-    ProxyRequestHandler,
-)
+from lfault.server import CONNECT_ESTABLISHED_RESPONSE, ProxyRequestHandler
+
+CREATE_CONNECTION_PATH = "lfault.server.socket.create_connection"
 
 
 class SocketDouble:
@@ -40,12 +39,21 @@ def make_handler(client: SocketDouble) -> ProxyRequestHandler:
     handler = ProxyRequestHandler.__new__(ProxyRequestHandler)
     handler.request = client
     handler.client_address = ("client.test", 12345)
-    handler.server = Mock()
     return handler
 
 
 class ForwardingTests(unittest.TestCase):
     no_content_response = b"HTTP/1.1 204 No Content\r\n\r\n"
+
+    def assert_request_rejected(self, *incoming: bytes) -> None:
+        client = SocketDouble(*incoming)
+        with (
+            self.assertLogs("lfault.server", level="WARNING"),
+            patch(CREATE_CONNECTION_PATH) as connect,
+        ):
+            make_handler(client).handle()
+
+        connect.assert_not_called()
 
     def test_relays_one_http_exchange_verbatim(self) -> None:
         request_head = (
@@ -60,48 +68,33 @@ class ForwardingTests(unittest.TestCase):
         client = SocketDouble(request_head + b"body")
         upstream = SocketDouble(informational + response)
 
-        with patch(
-            "lfault.server.socket.create_connection",
-            return_value=upstream,
-        ) as connect:
+        with patch(CREATE_CONNECTION_PATH, return_value=upstream) as connect:
             make_handler(client).handle()
 
         connect.assert_called_once_with(("upstream.test", 80))
         self.assertEqual(upstream.sent, [request_head, b"body"])
         self.assertEqual(b"".join(client.sent), informational + response)
 
-    def test_rejects_requests_it_cannot_relay(self) -> None:
-        cases = (
-            (
-                "expectation",
-                (
-                    b"POST http://upstream.test/ HTTP/1.1\r\n"
-                    b"Content-Length: 4\r\n"
-                    b"Expect: 100-continue\r\n\r\n",
-                ),
-            ),
-            (
-                "ambiguous framing",
-                (
-                    b"POST http://upstream.test/ HTTP/1.1\r\n"
-                    b"Transfer-Encoding: chunked\r\n"
-                    b"Content-Length: 4\r\n\r\n",
-                ),
-            ),
-            (
-                "incomplete head",
-                (b"CONNECT upstream.test:443 HTTP/1.1\r\n", b""),
-            ),
+    def test_rejects_expectation(self) -> None:
+        request = (
+            b"POST http://upstream.test/ HTTP/1.1\r\n"
+            b"Content-Length: 4\r\n"
+            b"Expect: 100-continue\r\n\r\n"
         )
-        for name, incoming in cases:
-            with self.subTest(case=name):
-                client = SocketDouble(*incoming)
-                with (
-                    self.assertLogs("lfault.server", level="WARNING"),
-                    patch("lfault.server.socket.create_connection") as connect,
-                ):
-                    make_handler(client).handle()
-                connect.assert_not_called()
+        self.assert_request_rejected(request)
+
+    def test_rejects_ambiguous_request_framing(self) -> None:
+        request = (
+            b"POST http://upstream.test/ HTTP/1.1\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"Content-Length: 4\r\n\r\n"
+        )
+        self.assert_request_rejected(request)
+
+    def test_rejects_incomplete_request_head(self) -> None:
+        self.assert_request_rejected(
+            b"CONNECT upstream.test:443 HTTP/1.1\r\n", b""
+        )
 
     def test_relays_a_chunked_request_with_extensions_and_trailers(self) -> None:
         request_head = (
@@ -112,7 +105,7 @@ class ForwardingTests(unittest.TestCase):
         client = SocketDouble(request_head + request_body)
         upstream = SocketDouble(self.no_content_response)
 
-        with patch("lfault.server.socket.create_connection", return_value=upstream):
+        with patch(CREATE_CONNECTION_PATH, return_value=upstream):
             make_handler(client).handle()
 
         self.assertEqual(b"".join(upstream.sent), request_head + request_body)
@@ -127,10 +120,7 @@ class ForwardingTests(unittest.TestCase):
 
         with (
             self.assertLogs("lfault.server", level="INFO") as captured,
-            patch(
-                "lfault.server.socket.create_connection",
-                return_value=upstream,
-            ),
+            patch(CREATE_CONNECTION_PATH, return_value=upstream),
         ):
             make_handler(client).handle()
 
@@ -156,10 +146,7 @@ class ConnectTunnelTests(unittest.TestCase):
 
         with (
             patch.object(handler, "_relay_bidirectionally") as relay,
-            patch(
-                "lfault.server.socket.create_connection",
-                return_value=upstream,
-            ) as connect,
+            patch(CREATE_CONNECTION_PATH, return_value=upstream) as connect,
         ):
             handler.handle()
 
@@ -174,10 +161,7 @@ class ConnectTunnelTests(unittest.TestCase):
         client = SocketDouble(self.request_head)
         with (
             self.assertLogs("lfault.server", level="WARNING"),
-            patch(
-                "lfault.server.socket.create_connection",
-                side_effect=OSError("connection failed"),
-            ),
+            patch(CREATE_CONNECTION_PATH, side_effect=OSError("connection failed")),
         ):
             make_handler(client).handle()
 
