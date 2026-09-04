@@ -2,8 +2,8 @@ import socket
 from enum import Enum
 
 BUFFER_SIZE = 4096
-LINE_TERMINATOR = b"\r\n"
-HEAD_TERMINATOR = b"\r\n\r\n"
+LINE_TERMINATOR: bytes = b"\r\n"
+HEAD_TERMINATOR: bytes = b"\r\n\r\n"
 _HEX_DIGITS = b"0123456789abcdefABCDEF"
 
 

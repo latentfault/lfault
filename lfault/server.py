@@ -3,6 +3,7 @@ import selectors
 import socket
 import socketserver
 from contextlib import suppress
+from typing import cast
 from urllib.parse import urlsplit
 
 from . import http1
@@ -72,8 +73,9 @@ class ProxyRequestHandler(socketserver.BaseRequestHandler):
         except OSError as error:
             logger.warning("I/O failure while handling %s: %s", context, error)
 
+    @staticmethod
     def _read_request(
-        self, client: http1.BufferedSocket, context: str
+        client: http1.BufferedSocket, context: str
     ) -> RoutedRequest | None:
         request_head, complete = client.read_until(http1.HEAD_TERMINATOR)
         if not request_head:
@@ -143,13 +145,14 @@ class ProxyRequestHandler(socketserver.BaseRequestHandler):
     def _relay_ready_stream(
         selector: selectors.BaseSelector, key: selectors.SelectorKey
     ) -> None:
+        source = cast(socket.socket, key.fileobj)
         destination = key.data
-        chunk = key.fileobj.recv(http1.BUFFER_SIZE)
+        chunk = source.recv(http1.BUFFER_SIZE)
         if chunk:
             destination.sendall(chunk)
             return
 
-        selector.unregister(key.fileobj)
+        selector.unregister(source)
         # Propagate this EOF while allowing reverse traffic to continue.
         with suppress(OSError):
             destination.shutdown(socket.SHUT_WR)
