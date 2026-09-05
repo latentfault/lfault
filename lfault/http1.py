@@ -1,60 +1,74 @@
-import socket
-from enum import Enum
+"""Interpret HTTP/1 routing and framing while preserving the original bytes."""
 
-BUFFER_SIZE = 4096
+import socket
+from dataclasses import dataclass
+from enum import Enum
+from urllib.parse import urlsplit
+
+from . import streams
+
 LINE_TERMINATOR: bytes = b"\r\n"
 HEAD_TERMINATOR: bytes = b"\r\n\r\n"
+CONNECT_METHOD = b"CONNECT"
+CONNECT_ESTABLISHED_RESPONSE = b"HTTP/1.1 200 Connection Established\r\n\r\n"
 _HEX_DIGITS = b"0123456789abcdefABCDEF"
 
+Address = tuple[str, int]
 
-class BufferedSocket:
-    """Owns bytes already received but not yet consumed by a reader."""
 
-    def __init__(self, transport: socket.socket) -> None:
-        self.transport = transport
-        self._buffer = bytearray()
+@dataclass(frozen=True)
+class RoutedRequest:
+    """An unchanged request head and the routing facts derived from it."""
 
-    def read(self, size: int) -> bytes:
-        if not self._buffer:
-            return self.transport.recv(size)
-        count = min(size, len(self._buffer))
-        data = bytes(self._buffer[:count])
-        del self._buffer[:count]
-        return data
+    head: bytes
+    method: bytes
+    destination: Address
 
-    def read_exactly(self, size: int) -> tuple[bytes, bool]:
-        """Return size bytes, or partial data and False if EOF arrives first."""
-        data = bytearray()
-        while len(data) < size:
-            chunk = self.read(size - len(data))
-            if not chunk:
-                return bytes(data), False
-            data.extend(chunk)
-        return bytes(data), True
 
-    def read_until(self, marker: bytes) -> tuple[bytes, bool]:
-        """Read through marker, or return partial data and False at EOF."""
-        while (boundary := self._buffer.find(marker)) < 0:
-            chunk = self.transport.recv(BUFFER_SIZE)
-            if not chunk:
-                data = bytes(self._buffer)
-                self._buffer.clear()
-                return data, False
-            self._buffer.extend(chunk)
+def parse_request_route(request_head: bytes) -> RoutedRequest:
+    """Keep the original head and derive its route, or raise ValueError."""
+    request_line = request_head.partition(LINE_TERMINATOR)[0]
+    parts = request_line.split(b" ")
+    if len(parts) != 3 or not all(parts):
+        raise ValueError("malformed request line")
 
-        end = boundary + len(marker)
-        data = bytes(self._buffer[:end])
-        del self._buffer[:end]
-        return data, True
+    method, target, _ = parts
+    if method == CONNECT_METHOD:
+        destination = _parse_connect_target(target)
+    else:
+        destination = _parse_http_target(target)
+    return RoutedRequest(request_head, method, destination)
 
-    def drain_buffer(self) -> bytes:
-        data = bytes(self._buffer)
-        self._buffer.clear()
-        return data
+
+def _parse_connect_target(target: bytes) -> Address:
+    # The // prefix makes urlsplit interpret authority-form as an authority.
+    parsed = urlsplit(b"//" + target)
+    port = parsed.port
+    hostname = parsed.hostname
+    target_suffix = parsed.path or parsed.query or parsed.fragment
+
+    if not hostname or port is None:
+        raise ValueError("CONNECT target is missing a host or port")
+    if target_suffix or parsed.username is not None:
+        raise ValueError("CONNECT target contains non-authority components")
+    return hostname.decode("ascii"), port
+
+
+def _parse_http_target(target: bytes) -> Address:
+    parsed = urlsplit(target)
+    port = parsed.port
+    hostname = parsed.hostname
+
+    if parsed.scheme.lower() != b"http" or not hostname:
+        raise ValueError("request target is not an absolute HTTP URL")
+    return hostname.decode("ascii"), 80 if port is None else port
 
 
 class BodyKind(Enum):
+    """Body boundaries that cannot be expressed as an exact byte count."""
+
     CHUNKED = "chunked"
+    # No known boundary; the caller decides whether reading to EOF is acceptable.
     OPAQUE = "opaque"
 
 
@@ -83,6 +97,7 @@ def request_body_framing(request_head: bytes) -> BodyFraming:
 def final_response_body_framing(
     response_head: bytes, request_method: bytes, status: int
 ) -> BodyFraming:
+    """Determine framing after informational and upgrade responses are handled."""
     if request_method == b"HEAD" or status in (204, 304):
         return 0
     if _has_whitespace_around_framing_field_name(response_head):
@@ -113,30 +128,18 @@ def has_expectation(request_head: bytes) -> bool:
     return bool(_header_values(request_head, b"expect"))
 
 
-def _relay_exactly(
-    source: BufferedSocket, destination: socket.socket, length: int
-) -> bool:
-    remaining = length
-    while remaining:
-        chunk = source.read(min(BUFFER_SIZE, remaining))
-        if not chunk:
-            return False
-        destination.sendall(chunk)
-        remaining -= len(chunk)
-    return True
-
-
 def relay_body(
-    source: BufferedSocket, destination: socket.socket, framing: BodyFraming
+    source: streams.BufferedSocket, destination: socket.socket, framing: BodyFraming
 ) -> bool:
+    """Copy a framed body; False can follow forwarding incomplete or invalid bytes."""
     if isinstance(framing, int):
-        return _relay_exactly(source, destination, framing)
+        return streams.relay_exactly(source, destination, framing)
     if framing is BodyKind.CHUNKED:
         return _relay_chunked(source, destination)
     raise ValueError("an opaque body has no known boundary")
 
 
-def _relay_chunked(source: BufferedSocket, destination: socket.socket) -> bool:
+def _relay_chunked(source: streams.BufferedSocket, destination: socket.socket) -> bool:
     while True:
         size = _relay_chunk_size_line(source, destination)
         if size is None:
@@ -144,7 +147,7 @@ def _relay_chunked(source: BufferedSocket, destination: socket.socket) -> bool:
         if size == 0:
             return _relay_trailers(source, destination)
 
-        if not _relay_exactly(source, destination, size):
+        if not streams.relay_exactly(source, destination, size):
             return False
 
         chunk_terminator, complete = source.read_exactly(len(LINE_TERMINATOR))
@@ -155,7 +158,7 @@ def _relay_chunked(source: BufferedSocket, destination: socket.socket) -> bool:
 
 
 def _relay_chunk_size_line(
-    source: BufferedSocket, destination: socket.socket
+    source: streams.BufferedSocket, destination: socket.socket
 ) -> int | None:
     size_line, complete = source.read_until(LINE_TERMINATOR)
     if size_line:
@@ -173,7 +176,7 @@ def _parse_chunk_size(size_line: bytes) -> int | None:
     return int(size_token, 16)
 
 
-def _relay_trailers(source: BufferedSocket, destination: socket.socket) -> bool:
+def _relay_trailers(source: streams.BufferedSocket, destination: socket.socket) -> bool:
     while True:
         trailer_line, complete = source.read_until(LINE_TERMINATOR)
         if trailer_line:
@@ -182,11 +185,6 @@ def _relay_trailers(source: BufferedSocket, destination: socket.socket) -> bool:
             return False
         if trailer_line == LINE_TERMINATOR:
             return True
-
-
-def relay_to_eof(source: BufferedSocket, destination: socket.socket) -> None:
-    while chunk := source.read(BUFFER_SIZE):
-        destination.sendall(chunk)
 
 
 def _header_values(message_head: bytes, name: bytes) -> list[bytes]:

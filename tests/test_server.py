@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from lfault.server import CONNECT_ESTABLISHED_RESPONSE, ProxyRequestHandler
+from lfault import http1
+from lfault.server import ProxyRequestHandler
 
 CREATE_CONNECTION_PATH = "lfault.server.socket.create_connection"
 
@@ -131,6 +132,62 @@ class ForwardingTests(unittest.TestCase):
         self.assertNotIn(request_target.decode("ascii"), log_output)
         self.assertEqual(upstream.sent, [request_head])
 
+    def test_stops_after_one_exchange(self) -> None:
+        request = b"GET http://upstream.test/ HTTP/1.1\r\n\r\n"
+        response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        client = SocketDouble(request + b"GET http://next.test/ HTTP/1.1\r\n\r\n")
+        upstream = SocketDouble(response + b"following")
+
+        with patch(CREATE_CONNECTION_PATH, return_value=upstream) as connect:
+            make_handler(client).handle()
+
+        connect.assert_called_once_with(("upstream.test", 80))
+        self.assertEqual(upstream.sent, [request])
+        self.assertEqual(b"".join(client.sent), response)
+        self.assertTrue(upstream.closed)
+
+    def test_head_response_does_not_read_a_body(self) -> None:
+        request = b"HEAD http://upstream.test/ HTTP/1.1\r\n\r\n"
+        response = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"
+        client = SocketDouble(request)
+        upstream = SocketDouble(response)
+
+        with patch(CREATE_CONNECTION_PATH, return_value=upstream):
+            make_handler(client).handle()
+
+        self.assertEqual(client.sent, [response])
+        self.assertTrue(upstream.closed)
+
+    def test_relays_unframed_response_to_eof(self) -> None:
+        client = SocketDouble(b"GET http://upstream.test/ HTTP/1.1\r\n\r\n")
+        response = b"HTTP/1.1 200 OK\r\n\r\nbody"
+        upstream = SocketDouble(response, b"more", b"")
+
+        with patch(CREATE_CONNECTION_PATH, return_value=upstream):
+            make_handler(client).handle()
+
+        self.assertEqual(b"".join(client.sent), response + b"more")
+        self.assertTrue(upstream.closed)
+
+    def test_switching_protocols_preserves_both_stream_buffers(self) -> None:
+        request = b"GET http://upstream.test/ HTTP/1.1\r\n\r\n"
+        response = b"HTTP/1.1 101 Switching Protocols\r\n\r\n"
+        client = SocketDouble(request + b"client data")
+        upstream = SocketDouble(response + b"upstream data")
+
+        with (
+            patch(CREATE_CONNECTION_PATH, return_value=upstream),
+            patch("lfault.server.streams.relay_bidirectionally") as relay,
+        ):
+            make_handler(client).handle()
+
+        self.assertEqual(upstream.sent, [request])
+        self.assertEqual(client.sent, [response])
+        client_stream, upstream_stream = relay.call_args.args
+        self.assertEqual(client_stream.read(11), b"client data")
+        self.assertEqual(upstream_stream.read(13), b"upstream data")
+        self.assertTrue(upstream.closed)
+
 
 class ConnectTunnelTests(unittest.TestCase):
     request_head = (
@@ -145,13 +202,13 @@ class ConnectTunnelTests(unittest.TestCase):
         upstream = SocketDouble()
 
         with (
-            patch.object(handler, "_relay_bidirectionally") as relay,
+            patch("lfault.server.streams.relay_bidirectionally") as relay,
             patch(CREATE_CONNECTION_PATH, return_value=upstream) as connect,
         ):
             handler.handle()
 
         connect.assert_called_once_with(("upstream.test", 443))
-        self.assertEqual(client.sent, [CONNECT_ESTABLISHED_RESPONSE])
+        self.assertEqual(client.sent, [http1.CONNECT_ESTABLISHED_RESPONSE])
         client_stream, upstream_stream = relay.call_args.args
         self.assertEqual(client_stream.read(len(client_hello)), client_hello)
         self.assertIs(upstream_stream.transport, upstream)

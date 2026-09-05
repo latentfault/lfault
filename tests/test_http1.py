@@ -1,17 +1,44 @@
 import unittest
 from unittest.mock import Mock
 
-from lfault import http1
+from lfault import http1, streams
 
 
-class BufferedSocketTests(unittest.TestCase):
-    def test_reads_a_split_boundary_and_retains_following_bytes(self) -> None:
-        transport = Mock()
-        transport.recv.side_effect = (b"head\r\n\r", b"\nfollowing")
-        stream = http1.BufferedSocket(transport)
+class RequestRouteTests(unittest.TestCase):
+    def test_routes_from_the_target_and_preserves_the_head(self) -> None:
+        cases = (
+            (b"GET", b"http://upstream.test/path?q=1", ("upstream.test", 80)),
+            (b"POST", b"http://upstream.test:8080/", ("upstream.test", 8080)),
+            (b"GET", b"http://[::1]:8080/", ("::1", 8080)),
+            (b"CONNECT", b"upstream.test:443", ("upstream.test", 443)),
+            (b"CONNECT", b"[::1]:443", ("::1", 443)),
+        )
+        for method, target, destination in cases:
+            with self.subTest(method=method, target=target):
+                head = (
+                    method + b" " + target + b" HTTP/1.1\r\n"
+                    b"Host: ignored.test\r\nMalformed field\r\n\r\n"
+                )
+                request = http1.parse_request_route(head)
+                self.assertEqual(request.head, head)
+                self.assertEqual(request.method, method)
+                self.assertEqual(request.destination, destination)
 
-        self.assertEqual(stream.read_until(b"\r\n\r\n"), (b"head\r\n\r\n", True))
-        self.assertEqual(stream.read(len(b"following")), b"following")
+    def test_rejects_unroutable_request_lines(self) -> None:
+        for line in (
+            b"GET /relative HTTP/1.1",
+            b"GET https://upstream.test/ HTTP/1.1",
+            b"GET  http://upstream.test/ HTTP/1.1",
+            b"GET http://upstream.test/",
+            b"GET http://\xff/ HTTP/1.1",
+            b"CONNECT upstream.test HTTP/1.1",
+            b"CONNECT upstream.test:443/path HTTP/1.1",
+            b"CONNECT user@upstream.test:443 HTTP/1.1",
+            b"CONNECT upstream.test:invalid HTTP/1.1",
+            b"CONNECT [::1]:99999 HTTP/1.1",
+        ):
+            with self.subTest(line=line), self.assertRaises(ValueError):
+                http1.parse_request_route(line + b"\r\n\r\n")
 
 
 class ResponseStatusTests(unittest.TestCase):
@@ -58,3 +85,38 @@ class BodyFramingTests(unittest.TestCase):
             ),
             http1.BodyKind.OPAQUE,
         )
+
+
+class ChunkedRelayTests(unittest.TestCase):
+    def test_preserves_chunk_bytes_and_stops_before_following_data(self) -> None:
+        body = b"4;note=value\r\nbody\r\n0\r\nX-Trailer: value\r\n\r\n"
+        transport = Mock()
+        transport.recv.return_value = body + b"next"
+        source = streams.BufferedSocket(transport)
+        destination = Mock()
+
+        self.assertTrue(http1.relay_body(source, destination, http1.BodyKind.CHUNKED))
+        sent = b"".join(call.args[0] for call in destination.sendall.call_args_list)
+        self.assertEqual(sent, body)
+        self.assertEqual(source.read(4), b"next")
+
+    def test_reports_failure_after_forwarding_invalid_or_partial_bytes(self) -> None:
+        for body in (
+            b"not-hex\r\n",
+            b"4\r\nbo",
+            b"4\r\nbodyXX",
+            b"0\r\nX-Trailer: value\r\n",
+        ):
+            with self.subTest(body=body):
+                transport = Mock()
+                transport.recv.side_effect = (body, b"")
+                source = streams.BufferedSocket(transport)
+                destination = Mock()
+
+                self.assertFalse(
+                    http1.relay_body(source, destination, http1.BodyKind.CHUNKED)
+                )
+                sent = b"".join(
+                    call.args[0] for call in destination.sendall.call_args_list
+                )
+                self.assertEqual(sent, body)
