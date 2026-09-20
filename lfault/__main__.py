@@ -2,5 +2,6 @@ from .server import listen
 
 
 with listen() as listener:
-    client, _ = listener.accept()
-    client.close()
+    while True:
+        client, _ = listener.accept()
+        client.close()
