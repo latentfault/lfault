@@ -7,3 +7,4 @@ with listen() as listener:
         with client:
             chunk = client.recv(4096)
             print(repr(chunk))
+            print("Header terminator found:", b"\r\n\r\n" in chunk)
