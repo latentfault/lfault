@@ -1,5 +1,8 @@
 import socket
 
+HEADER_SEPARATOR = b"\r\n\r\n"
+CHUNK_SIZE = 4096
+
 
 def listen(port=8080):
     listener = socket.socket()
@@ -11,6 +14,9 @@ def listen(port=8080):
 
 def handle_client(client):
     with client:
-        chunk = client.recv(4096)
-        print(repr(chunk))
-        print("Header terminator found:", b"\r\n\r\n" in chunk)
+        data = bytes()
+        while HEADER_SEPARATOR not in data:
+            if not (chunk := client.recv(CHUNK_SIZE)):
+                return
+            data += chunk
+        print("Header terminator found:", HEADER_SEPARATOR in data)
