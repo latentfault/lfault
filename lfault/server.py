@@ -19,4 +19,6 @@ def handle_client(client):
             if not (chunk := client.recv(CHUNK_SIZE)):
                 return
             data += chunk
-        print("Header terminator found:", HEADER_SEPARATOR in data)
+        head, _, remainder = data.partition(HEADER_SEPARATOR)
+        print("Request head:", repr(head))
+        print("Already received after headers:", repr(remainder))
