@@ -1,6 +1,7 @@
 import socket
 
 HEADER_SEPARATOR = b"\r\n\r\n"
+LINE_SEPARATOR = b"\r\n"
 CHUNK_SIZE = 4096
 
 
@@ -20,5 +21,7 @@ def handle_client(client):
                 return
             data += chunk
         head, _, remainder = data.partition(HEADER_SEPARATOR)
-        print("Request head:", repr(head))
+        request_line, _, headers = head.partition(LINE_SEPARATOR)
+        print("Request line:", repr(request_line))
+        print("Headers:", repr(headers))
         print("Already received after headers:", repr(remainder))
