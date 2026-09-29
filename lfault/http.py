@@ -11,4 +11,5 @@ def parse_request_head(data):
         raise ValueError("request line must contain exactly three fields")
     method, target, version = parts
     headers = headers.split(LINE_SEPARATOR) if headers else []
+    headers = [line.partition(b":") for line in headers]
     return method, target, version, headers, remainder
