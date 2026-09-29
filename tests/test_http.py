@@ -8,6 +8,7 @@ class ParseRequestHeadTest(unittest.TestCase):
         data = (
             b"POST /submit HTTP/1.1\r\n"
             b"Host: lfault.test\r\n"
+            b"Content-Length: 6\r\n"
             b"\r\n"
             b"lfault"
         )
@@ -17,5 +18,5 @@ class ParseRequestHeadTest(unittest.TestCase):
         self.assertEqual(method, b"POST")
         self.assertEqual(target, b"/submit")
         self.assertEqual(version, b"HTTP/1.1")
-        self.assertEqual(headers, b"Host: lfault.test")
+        self.assertEqual(headers, [b"Host: lfault.test", b"Content-Length: 6"])
         self.assertEqual(remainder, b"lfault")

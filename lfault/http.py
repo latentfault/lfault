@@ -10,4 +10,5 @@ def parse_request_head(data):
     if len(parts) != 3:
         raise ValueError("request line must contain exactly three fields")
     method, target, version = parts
+    headers = headers.split(LINE_SEPARATOR) if headers else []
     return method, target, version, headers, remainder
