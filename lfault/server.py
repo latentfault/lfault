@@ -1,6 +1,6 @@
 import socket
 
-from .http import HEADER_SEPARATOR, parse_request_head
+from .http import read_request_head
 
 CHUNK_SIZE = 4096
 
@@ -14,13 +14,15 @@ def listen(port=8080):
 
 
 def handle_client(client):
-    with client:
-        data = bytes()
-        while HEADER_SEPARATOR not in data:
-            if not (chunk := client.recv(CHUNK_SIZE)):
-                return
-            data += chunk
+    with client, client.makefile("rb") as stream:
         try:
-            parse_request_head(data)
-        except ValueError:
+            request = read_request_head(stream)
+        except (EOFError, ValueError):
             return
+
+        # The current forwarding step handles one bodyless request.
+        with socket.create_connection(request.upstream_address) as upstream:
+            upstream.sendall(request.raw)
+            # Until we parse response framing, the upstream must close to end this loop.
+            while chunk := upstream.recv(CHUNK_SIZE):
+                client.sendall(chunk)

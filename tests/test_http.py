@@ -1,30 +1,17 @@
 import unittest
 
-from lfault.http import parse_request_head
+from lfault.http import RequestHead
 
 
 class ParseRequestHeadTest(unittest.TestCase):
     def test_parses_request_head(self):
         data = (
-            b"POST /submit HTTP/1.1\r\n"
+            b"GET http://lfault.test:8080/ HTTP/1.1\r\n"
             b"Host: lfault.test:8080\r\n"
-            b"Content-Length: 6\r\n"
-            b"Odd-Header\r\n"
             b"\r\n"
-            b"lfault"
         )
 
-        method, target, version, headers, remainder = parse_request_head(data)
+        request = RequestHead(data)
 
-        self.assertEqual(method, b"POST")
-        self.assertEqual(target, b"/submit")
-        self.assertEqual(version, b"HTTP/1.1")
-        self.assertEqual(
-            headers,
-            [
-                (b"Host", b":", b" lfault.test:8080"),
-                (b"Content-Length", b":", b" 6"),
-                (b"Odd-Header", b"", b""),
-            ],
-        )
-        self.assertEqual(remainder, b"lfault")
+        self.assertEqual(request.raw, data)
+        self.assertEqual(request.upstream_address, (b"lfault.test", 8080))

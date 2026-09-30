@@ -1,15 +1,32 @@
+from urllib.parse import urlsplit
+
+
 HEADER_SEPARATOR = b"\r\n\r\n"
 LINE_SEPARATOR = b"\r\n"
 FIELD_SEPARATOR = b" "
 
 
-def parse_request_head(data):
-    head, _, remainder = data.partition(HEADER_SEPARATOR)
-    request_line, _, headers = head.partition(LINE_SEPARATOR)
-    parts = request_line.split(FIELD_SEPARATOR)
-    if len(parts) != 3:
-        raise ValueError("request line must contain exactly three fields")
-    method, target, version = parts
-    headers = headers.split(LINE_SEPARATOR) if headers else []
-    headers = [line.partition(b":") for line in headers]
-    return method, target, version, headers, remainder
+class RequestHead:
+    def __init__(self, raw):
+        request_line, _, _ = raw.partition(LINE_SEPARATOR)
+        _, target, _ = request_line.split(FIELD_SEPARATOR)
+        url = urlsplit(target)
+
+        if url.scheme != b"http" or not url.hostname:
+            raise ValueError("request target must be an absolute HTTP URL")
+
+        port = url.port
+        self.raw = raw
+        self.upstream_address = (
+            url.hostname,
+            80 if port is None else port,
+        )
+
+
+def read_request_head(stream):
+    data = bytearray()
+    while line := stream.readline():
+        data.extend(line)
+        if data.endswith(HEADER_SEPARATOR):
+            return RequestHead(bytes(data))
+    raise EOFError("stream ended before a complete request head was received")
