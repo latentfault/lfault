@@ -4,7 +4,7 @@ from lfault.http import RequestHead
 
 
 class ParseRequestHeadTest(unittest.TestCase):
-    def test_parses_request_head(self):
+    def test_parses_request_head(self) -> None:
         data = (
             b"GET http://lfault.test:8080/ HTTP/1.1\r\n"
             b"Host: lfault.test:8080\r\n"

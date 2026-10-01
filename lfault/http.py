@@ -1,3 +1,4 @@
+from io import BufferedReader
 from urllib.parse import urlsplit
 
 
@@ -7,26 +8,46 @@ FIELD_SEPARATOR = b" "
 
 
 class RequestHead:
-    def __init__(self, raw):
-        request_line, _, _ = raw.partition(LINE_SEPARATOR)
+    def __init__(self, raw: bytes) -> None:
+        request_line, _, header_lines = raw.partition(LINE_SEPARATOR)
         _, target, _ = request_line.split(FIELD_SEPARATOR)
         url = urlsplit(target)
 
         if url.scheme != b"http" or not url.hostname:
             raise ValueError("request target must be an absolute HTTP URL")
 
-        port = url.port
         self.raw = raw
         self.upstream_address = (
             url.hostname,
-            80 if port is None else port,
+            80 if url.port is None else url.port,
         )
+        self.content_length = 0
+        for line in header_lines.split(LINE_SEPARATOR):
+            name, _, value = line.partition(b":")
+            if name.lower() == b"content-length":
+                self.content_length = int(value)
+        if self.content_length < 0:
+            raise ValueError("Content-Length must not be negative")
 
 
-def read_request_head(stream):
+class Request:
+    def __init__(self, head: RequestHead, body: bytes = b"") -> None:
+        self.head = head
+        self.body = body
+
+
+def read_request_head(stream: BufferedReader) -> RequestHead:
     data = bytearray()
     while line := stream.readline():
         data.extend(line)
         if data.endswith(HEADER_SEPARATOR):
             return RequestHead(bytes(data))
     raise EOFError("stream ended before a complete request head was received")
+
+
+def read_request(stream: BufferedReader) -> Request:
+    head = read_request_head(stream)
+    body = stream.read(head.content_length)
+    if len(body) != head.content_length:
+        raise EOFError("stream ended before the complete request body was received")
+    return Request(head, body)
