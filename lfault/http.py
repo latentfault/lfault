@@ -31,7 +31,7 @@ class Request:
             raise ValueError("Content-Length must not be negative")
 
     @classmethod
-    def from_stream(cls, stream: BufferedReader) -> "Request":
+    def from_stream(cls, stream: BufferedReader) -> Request:
         data = bytearray()
         while line := stream.readline():
             data.extend(line)
