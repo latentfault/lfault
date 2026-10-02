@@ -31,22 +31,21 @@ class RequestHead:
 
 
 class Request:
-    def __init__(self, head: RequestHead, body: bytes = b"") -> None:
+    def __init__(self, head: RequestHead, body: bytes = bytes()) -> None:
         self.head = head
         self.body = body
 
 
-def read_request_head(stream: BufferedReader) -> RequestHead:
+def read_request(stream: BufferedReader) -> Request:
     data = bytearray()
     while line := stream.readline():
         data.extend(line)
         if data.endswith(HEADER_SEPARATOR):
-            return RequestHead(bytes(data))
-    raise EOFError("stream ended before a complete request head was received")
+            break
+    else:
+        raise EOFError("stream ended before a complete request head was received")
 
-
-def read_request(stream: BufferedReader) -> Request:
-    head = read_request_head(stream)
+    head = RequestHead(bytes(data))
     body = stream.read(head.content_length)
     if len(body) != head.content_length:
         raise EOFError("stream ended before the complete request body was received")
